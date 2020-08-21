@@ -313,6 +313,52 @@ func (c *Client) FetchCert(ctx context.Context, url string, bundle bool) ([][]by
 	return c.responseCert(ctx, res, bundle)
 }
 
+// FetchCertAlternatives retrieves already issued certificate alternatives from the given url, in DER format.
+// It retries the request until the certificate is successfully retrieved,
+// context is cancelled by the caller or an error response is received.
+//
+// If the bundle argument is true, the returned value also contains the CA (issuer)
+// certificate chain.
+//
+// FetchCertAlternatives returns an error if the CA's response or chain was unreasonably large.
+// If teh certificate fetch of one call fails it will also return an error and will stop fetching
+// alternative certificates.
+// Callers are encouraged to parse the returned value to ensure the certificate is valid
+// and has expected features.
+func (c *Client) FetchCertAlternatives(ctx context.Context, url string, bundle bool) ([][][]byte, error) {
+	dir, err := c.Discover(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !dir.rfcCompliant() {
+		return nil, errors.New("only RFC compliant endpoints are supported")
+	}
+
+	res, err := c.postAsGet(ctx, url, wantStatus(http.StatusOK))
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+
+	altCertURLs := linkHeader(res.Header, "alternate")
+	if len(altCertURLs) == 0 {
+		// no extra certificates found returning a nil slice
+		return [][][]byte(nil), nil
+	}
+
+	bundles := [][][]byte{}
+	for _, altCertURL := range altCertURLs {
+		bundle, err := c.fetchCertRFC(ctx, altCertURL, bundle)
+		if err != nil {
+			return bundles, err
+		}
+
+		bundles = append(bundles, bundle)
+	}
+
+	return bundles, nil
+}
+
 // RevokeCert revokes a previously issued certificate cert, provided in DER format.
 //
 // The key argument, used to sign the request, must be authorized
