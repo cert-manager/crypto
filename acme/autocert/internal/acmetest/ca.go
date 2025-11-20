@@ -145,7 +145,7 @@ func (ca *CAServer) URL() string {
 	return ca.url
 }
 
-// Roots returns a pool cointaining the CA root.
+// Roots returns a pool containing the CA root.
 func (ca *CAServer) Roots() *x509.CertPool {
 	if ca.url == "" {
 		panic("Roots called before Start")
@@ -781,16 +781,4 @@ func decodePayload(v interface{}, r io.Reader) error {
 
 func challengeToken(domain, challType string, authzID int) string {
 	return fmt.Sprintf("token-%s-%s-%d", domain, challType, authzID)
-}
-
-func unique(a []string) []string {
-	seen := make(map[string]bool)
-	var res []string
-	for _, s := range a {
-		if s != "" && !seen[s] {
-			seen[s] = true
-			res = append(res, s)
-		}
-	}
-	return res
 }
