@@ -191,6 +191,7 @@ func (c *Client) Discover(ctx context.Context) (Directory, error) {
 			ExternalAcct bool              `json:"externalAccountRequired"`
 			Profiles     map[string]string `json:"profiles"`
 		}
+		RenewalInfo string `json:"renewalInfo"`
 	}
 	if err := json.NewDecoder(res.Body).Decode(&v); err != nil {
 		return Directory{}, err
@@ -210,6 +211,7 @@ func (c *Client) Discover(ctx context.Context) (Directory, error) {
 		CAA:                     v.Meta.CAA,
 		ExternalAccountRequired: v.Meta.ExternalAcct,
 		Profiles:                v.Meta.Profiles,
+		RenewalInfo:             v.RenewalInfo,
 	}
 	return *c.dir, nil
 }

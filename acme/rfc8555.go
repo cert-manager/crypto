@@ -206,6 +206,7 @@ func (c *Client) AuthorizeOrder(ctx context.Context, id []AuthzID, opt ...OrderO
 		NotBefore   string        `json:"notBefore,omitempty"`
 		NotAfter    string        `json:"notAfter,omitempty"`
 		Profile     string        `json:"profile,omitempty"`
+		Replaces    string        `json:"replaces,omitempty"`
 	}{}
 	for _, v := range id {
 		req.Identifiers = append(req.Identifiers, wireAuthzID{
@@ -228,6 +229,13 @@ func (c *Client) AuthorizeOrder(ctx context.Context, id []AuthzID, opt ...OrderO
 				return nil, fmt.Errorf("%w %s", ErrProfileNotInSetOfSupportedProfiles, profileName)
 			}
 			req.Profile = profileName
+		case orderReplacesOpt:
+			// Per RFC 9773 clients SHOULD NOT include replaces unless the server
+			// advertises renewalInfo support in its directory object.
+			if dir.RenewalInfo == "" {
+				return nil, ErrCADoesNotSupportARI
+			}
+			req.Replaces = string(o)
 		default:
 			// Package's fault if we let this happen.
 			panic(fmt.Sprintf("unsupported order option type %T", o))
