@@ -7,6 +7,8 @@ package acme
 import (
 	"crypto"
 	"crypto/x509"
+	"encoding/asn1"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -69,6 +71,13 @@ var (
 	// ErrProfileNotInSetOfSupportedProfiles indicates that the profile
 	// specified with [WithOrderProfile} is not one supported by the CA
 	ErrProfileNotInSetOfSupportedProfiles = errors.New("acme: certificate authority does not advertise a profile with name")
+
+	// ErrCADoesNotSupportARI indicates the CA does not advertise the renewalInfo endpoint
+	// in its directory object (RFC 9773).
+	ErrCADoesNotSupportARI = errors.New("acme: certificate authority does not support ARI (renewalInfo)")
+
+	// ErrInvalidARICertID indicates an ARI CertID could not be constructed.
+	ErrInvalidARICertID = errors.New("acme: invalid ARI certificate identifier")
 )
 
 // A Subproblem describes an ACME subproblem as reported in an Error.
@@ -321,6 +330,10 @@ type Directory struct {
 	// Profiles indicates that the CA supports specifying a profile for an
 	// order. See also [WithOrderNotAfter].
 	Profiles Profiles
+
+	// RenewalInfo indicates the renewal information that a CA would return for a given
+	// certificate. Renewal information follows RFC 9773.
+	RenewalInfo string
 }
 
 // Order represents a client's request for a certificate.
@@ -412,6 +425,18 @@ func WithOrderProfile(name string) OrderOption {
 	return orderProfileOpt(name)
 }
 
+func WithOrderReplacesCertID(certID string) OrderOption {
+	return orderReplacesOpt(certID)
+}
+
+func WithOrderReplacesCertificate(cert *x509.Certificate) (OrderOption, error) {
+	certID, err := CertificateARIID(cert)
+	if err != nil {
+		return nil, err
+	}
+	return orderReplacesOpt(certID), nil
+}
+
 type orderNotBeforeOpt time.Time
 
 func (orderNotBeforeOpt) privateOrderOpt() {}
@@ -423,6 +448,10 @@ func (orderNotAfterOpt) privateOrderOpt() {}
 type orderProfileOpt string
 
 func (orderProfileOpt) privateOrderOpt() {}
+
+type orderReplacesOpt string
+
+func (orderReplacesOpt) privateOrderOpt() {}
 
 // Authorization encodes an authorization response.
 type Authorization struct {
@@ -691,4 +720,60 @@ func (ps Profiles) GetDescription(name string) string {
 func (ps Profiles) Has(name string) bool {
 	_, ok := ps[name]
 	return ok
+}
+
+type RenewalInfoResponse struct {
+	// SuggestedWindow is a window of time bound by start and end timestamps in which
+	// the CA recommends renewing the certificate.
+	SuggestedWindow RenewalInfoWindow `json:"suggestedWindow"`
+
+	// ExplanationURL is a human-readable URL that may explain why the suggested window
+	// has its current value. Clients are expected to provide this URL to their operators if
+	// present.
+	ExplanationURL string `json:"explanationURL"`
+
+	// RetryAfter header indicating the polling interval that the ACME server recommends.
+	// Conforming clients SHOULD query the renewalInfo URL again after the RetryAfter period has passed,
+	// as the server may provide a different suggestedWindow.
+	// https://www.rfc-editor.org/rfc/rfc9773.html#section-4.2
+	RetryAfter time.Duration
+}
+
+type RenewalInfoWindow struct {
+	// Start is the beginning of the recommended renewal window.
+	// See: https://www.rfc-editor.org/rfc/rfc9773.html#section-4.1
+	Start time.Time `json:"start"`
+	// End is the end of the recommended renewal window.
+	// See: https://www.rfc-editor.org/rfc/rfc9773.html#section-4.1
+	End time.Time `json:"end"`
+}
+
+func CertificateARIID(cert *x509.Certificate) (string, error) {
+	if cert == nil {
+		return "", fmt.Errorf("%w: nil certificate", ErrInvalidARICertID)
+	}
+
+	if len(cert.AuthorityKeyId) == 0 {
+		return "", fmt.Errorf("%w: missing AuthorityKeyId (AKI)", ErrInvalidARICertID)
+	}
+
+	// Marshal the Serial Number into DER.
+	der, err := asn1.Marshal(cert.SerialNumber)
+	if err != nil {
+		return "", err
+	}
+
+	// Check if the DER encoded bytes are sufficient (at least 3 bytes: tag,
+	// length, and value).
+	if len(der) < 3 {
+		return "", errors.New("invalid DER encoding of serial number")
+	}
+
+	aki := base64.RawURLEncoding.EncodeToString(cert.AuthorityKeyId)
+	serial := base64.RawURLEncoding.EncodeToString(der[2:])
+	if aki == "" || serial == "" {
+		return "", fmt.Errorf("%w: empty encoded parts", ErrInvalidARICertID)
+	}
+
+	return aki + "." + serial, nil
 }
