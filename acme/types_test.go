@@ -29,7 +29,7 @@ func TestExternalAccountBindingString(t *testing.T) {
 }
 
 func TestRateLimit(t *testing.T) {
-	now := time.Date(2017, 04, 27, 10, 0, 0, 0, time.UTC)
+	now := time.Date(2017, 0o4, 27, 10, 0, 0, 0, time.UTC)
 	f := timeNow
 	defer func() { timeNow = f }()
 	timeNow = func() time.Time { return now }
@@ -219,6 +219,22 @@ func TestErrorStringerWithSubproblems(t *testing.T) {
 	expectedStr := "1 urn:error: it's an error; subproblems:\n\turn:error:sub: it's a subproblem\n\turn:error:sub: [dns: example] it's a subproblem"
 	if err.Error() != expectedStr {
 		t.Errorf("Unexpected error string: wanted %q, got %q", expectedStr, err.Error())
+	}
+}
+
+func TestOrderErrorProblem(t *testing.T) {
+	oe := &OrderError{
+		OrderURL: "url",
+		Status:   "invalid",
+		Problem: &Error{
+			StatusCode:  400,
+			ProblemType: "type",
+			Detail:      "detail",
+		},
+	}
+	want := "acme: order url status: invalid; problem: 400 type: detail"
+	if got := oe.Error(); got != want {
+		t.Errorf("oe.Error() = %q, want %q", got, want)
 	}
 }
 
