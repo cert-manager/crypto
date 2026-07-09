@@ -326,7 +326,8 @@ func isRetriable(code int) bool {
 func responseError(resp *http.Response) error {
 	// don't care if ReadAll returns an error:
 	// json.Unmarshal will fail in that case anyway
-	b, _ := io.ReadAll(resp.Body)
+	// Bound the read; this also runs on every retry.
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 	e := &wireError{Status: resp.StatusCode}
 	if err := json.Unmarshal(b, e); err != nil {
 		// this is not a regular error response:

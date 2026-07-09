@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 )
@@ -36,7 +37,7 @@ func (c *Client) getRenewalInfoFromCertARIID(ctx context.Context, ariID string) 
 	defer res.Body.Close()
 
 	var ri RenewalInfoResponse
-	if err := json.NewDecoder(res.Body).Decode(&ri); err != nil {
+	if err := json.NewDecoder(io.LimitReader(res.Body, maxResponseSize)).Decode(&ri); err != nil {
 		return nil, fmt.Errorf("acme: invalid renewalInfo response: %w", err)
 	}
 

@@ -76,6 +76,54 @@ func TestErrorResponse(t *testing.T) {
 	}
 }
 
+// endlessReader yields the same byte forever.
+type endlessReader struct{ b byte }
+
+func (r endlessReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = r.b
+	}
+	return len(p), nil
+}
+
+// responseError must bound an unbounded body; otherwise this read never
+// terminates. The body is not JSON, so it lands in Detail capped at maxResponseSize.
+func TestErrorResponseBounded(t *testing.T) {
+	res := &http.Response{
+		StatusCode: 500,
+		Status:     "500 Internal Server Error",
+		Body:       io.NopCloser(endlessReader{b: 'A'}),
+		Header:     http.Header{},
+	}
+	err := responseError(res)
+	v, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("err = %+v (%T); want *Error type", err, err)
+	}
+	if len(v.Detail) != maxResponseSize {
+		t.Errorf("len(v.Detail) = %d; want %d", len(v.Detail), maxResponseSize)
+	}
+}
+
+// A sub-limit error body must be read in full and left untouched by the bound.
+func TestErrorResponseUnderLimit(t *testing.T) {
+	detail := strings.Repeat("A", maxResponseSize/2)
+	res := &http.Response{
+		StatusCode: 400,
+		Status:     "400 Bad Request",
+		Body:       io.NopCloser(strings.NewReader(`{"detail":"` + detail + `"}`)),
+		Header:     http.Header{},
+	}
+	err := responseError(res)
+	v, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("err = %+v (%T); want *Error type", err, err)
+	}
+	if v.Detail != detail {
+		t.Errorf("len(v.Detail) = %d; want %d (body must not be truncated)", len(v.Detail), len(detail))
+	}
+}
+
 func TestPostWithRetries(t *testing.T) {
 	var count int
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

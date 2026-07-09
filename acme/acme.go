@@ -34,6 +34,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -65,6 +66,10 @@ const (
 	// Used for decoding certs from application/pem-certificate-chain response,
 	// the default when in RFC mode.
 	maxCertChainSize = maxCertSize * maxChainLen
+
+	// Max size of a JSON response body or error detail, used to bound the memory
+	// a CA can make the client allocate. Certificate chains are bounded separately by maxCertChainSize.
+	maxResponseSize = 1 << 20 // 1 MiB
 
 	// Max number of collected nonces kept in memory.
 	// Expect usual peak of 1 or 2.
@@ -193,7 +198,7 @@ func (c *Client) Discover(ctx context.Context) (Directory, error) {
 		}
 		RenewalInfo string `json:"renewalInfo"`
 	}
-	if err := json.NewDecoder(res.Body).Decode(&v); err != nil {
+	if err := json.NewDecoder(io.LimitReader(res.Body, maxResponseSize)).Decode(&v); err != nil {
 		return Directory{}, err
 	}
 	if v.Order == "" {
@@ -379,7 +384,7 @@ func (c *Client) authorize(ctx context.Context, typ, val string) (*Authorization
 	defer res.Body.Close()
 
 	var v wireAuthz
-	if err := json.NewDecoder(res.Body).Decode(&v); err != nil {
+	if err := json.NewDecoder(io.LimitReader(res.Body, maxResponseSize)).Decode(&v); err != nil {
 		return nil, fmt.Errorf("acme: invalid response: %v", err)
 	}
 	if v.Status != StatusPending && v.Status != StatusValid {
@@ -403,7 +408,7 @@ func (c *Client) GetAuthorization(ctx context.Context, url string) (*Authorizati
 	}
 	defer res.Body.Close()
 	var v wireAuthz
-	if err := json.NewDecoder(res.Body).Decode(&v); err != nil {
+	if err := json.NewDecoder(io.LimitReader(res.Body, maxResponseSize)).Decode(&v); err != nil {
 		return nil, fmt.Errorf("acme: invalid response: %v", err)
 	}
 	d := retryAfter(res.Header.Get("Retry-After"))
@@ -459,7 +464,7 @@ func (c *Client) WaitAuthorization(ctx context.Context, url string) (*Authorizat
 		}
 
 		var raw wireAuthz
-		err = json.NewDecoder(res.Body).Decode(&raw)
+		err = json.NewDecoder(io.LimitReader(res.Body, maxResponseSize)).Decode(&raw)
 		res.Body.Close()
 		switch {
 		case err != nil:
@@ -507,7 +512,7 @@ func (c *Client) GetChallenge(ctx context.Context, url string) (*Challenge, erro
 
 	defer res.Body.Close()
 	v := wireChallenge{URI: url}
-	if err := json.NewDecoder(res.Body).Decode(&v); err != nil {
+	if err := json.NewDecoder(io.LimitReader(res.Body, maxResponseSize)).Decode(&v); err != nil {
 		return nil, fmt.Errorf("acme: invalid response: %v", err)
 	}
 	d := retryAfter(res.Header.Get("Retry-After"))
@@ -537,7 +542,7 @@ func (c *Client) Accept(ctx context.Context, chal *Challenge) (*Challenge, error
 	defer res.Body.Close()
 
 	var v wireChallenge
-	if err := json.NewDecoder(res.Body).Decode(&v); err != nil {
+	if err := json.NewDecoder(io.LimitReader(res.Body, maxResponseSize)).Decode(&v); err != nil {
 		return nil, fmt.Errorf("acme: invalid response: %v", err)
 	}
 	return v.challenge(0), nil

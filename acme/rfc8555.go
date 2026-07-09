@@ -142,7 +142,7 @@ func responseAccount(res *http.Response) (*Account, error) {
 		Contact []string
 		Orders  string
 	}
-	if err := json.NewDecoder(res.Body).Decode(&v); err != nil {
+	if err := json.NewDecoder(io.LimitReader(res.Body, maxResponseSize)).Decode(&v); err != nil {
 		return nil, fmt.Errorf("acme: invalid account response: %v", err)
 	}
 	return &Account{
@@ -327,7 +327,7 @@ func responseOrder(res *http.Response) (*Order, error) {
 		Finalize       string
 		Certificate    string
 	}
-	if err := json.NewDecoder(res.Body).Decode(&v); err != nil {
+	if err := json.NewDecoder(io.LimitReader(res.Body, maxResponseSize)).Decode(&v); err != nil {
 		return nil, fmt.Errorf("acme: error reading order: %v", err)
 	}
 	o := &Order{
