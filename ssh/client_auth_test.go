@@ -7,10 +7,12 @@ package ssh
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/rsa"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"net"
 	"os"
 	"runtime"
@@ -166,6 +168,40 @@ func TestClientAuthThirdKey(t *testing.T) {
 	}
 	if err := tryAuth(t, config); err != nil {
 		t.Fatalf("unable to dial remote side: %s", err)
+	}
+}
+
+// invalidRSASigner offers an RSA public key the server cannot parse: its public
+// exponent is even, which parseRSA rejects regardless of any key size limit.
+// The key is intentionally invalid for a structural reason rather than for its
+// size, so the test stays meaningful even if the accepted modulus size changes.
+// Its Sign method is never reached, because the key is rejected during the
+// initial public key query.
+type invalidRSASigner struct{}
+
+func (invalidRSASigner) PublicKey() PublicKey {
+	n := new(big.Int).Lsh(big.NewInt(1), 2048)
+	pub, err := NewPublicKey(&rsa.PublicKey{N: n, E: 2}) // incorrect exponent.
+	if err != nil {
+		panic(err)
+	}
+	return pub
+}
+
+func (invalidRSASigner) Sign(rand io.Reader, data []byte) (*Signature, error) {
+	return nil, errors.New("ssh: invalid test key must not be used to sign")
+}
+
+func TestClientAuthInvalidPublicKey(t *testing.T) {
+	config := &ClientConfig{
+		User: "testuser",
+		Auth: []AuthMethod{
+			PublicKeys(invalidRSASigner{}, testSigners["rsa"]),
+		},
+		HostKeyCallback: InsecureIgnoreHostKey(),
+	}
+	if err := tryAuth(t, config); err != nil {
+		t.Fatalf("client auth failed but should have fallen back to a valid key: %s", err)
 	}
 }
 
@@ -1651,6 +1687,74 @@ func TestAuthMethodGSSAPIWithMIC(t *testing.T) {
 				t.Errorf("server got error %q, want substring %q, case %d", errStrings, c.serverWantErr, i)
 			}
 		}
+	}
+}
+
+type maliciousGSSAPIWithMICAuthMethod struct{}
+
+func (maliciousGSSAPIWithMICAuthMethod) method() string {
+	// Reuse an advertised auth method name so the client attempts this
+	// AuthMethod even when gssapi-with-mic is not advertised.
+	return "password"
+}
+
+func (maliciousGSSAPIWithMICAuthMethod) auth(session []byte, user string, c packetConn, rand io.Reader, _ map[string][]byte) (authResult, []string, error) {
+	req := &userAuthRequestMsg{
+		User:    user,
+		Service: serviceSSH,
+		Method:  "gssapi-with-mic",
+	}
+	req.Payload = appendU32(req.Payload, 1)
+	req.Payload = appendString(req.Payload, string(krb5OID))
+	if err := c.writePacket(Marshal(req)); err != nil {
+		return authFailure, nil, err
+	}
+
+	packet, err := c.readPacket()
+	if err != nil {
+		return authFailure, nil, err
+	}
+	switch packet[0] {
+	case msgUserAuthFailure:
+		var msg userAuthFailureMsg
+		if err := Unmarshal(packet, &msg); err != nil {
+			return authFailure, nil, err
+		}
+		if msg.PartialSuccess {
+			return authPartialSuccess, msg.Methods, nil
+		}
+		return authFailure, msg.Methods, nil
+	default:
+		return authFailure, nil, unexpectedMessageError(msgUserAuthFailure, packet[0])
+	}
+}
+
+func TestGSSAPIWithMICPartialConfigRejectedAtRuntime(t *testing.T) {
+	config := &ClientConfig{
+		User: "testuser",
+		Auth: []AuthMethod{
+			maliciousGSSAPIWithMICAuthMethod{},
+		},
+		HostKeyCallback: InsecureIgnoreHostKey(),
+	}
+
+	clientErr, serverErrs := tryAuthBothSides(t, config, &GSSAPIWithMICConfig{
+		Server: &FakeServer{},
+	})
+
+	if clientErr == nil || !strings.Contains(clientErr.Error(), "ssh: unable to authenticate") {
+		t.Fatalf("client got %v, want authentication failure", clientErr)
+	}
+
+	found := false
+	for _, err := range serverErrs {
+		if err != nil && strings.Contains(err.Error(), "ssh: gssapi-with-mic auth not configured") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("server auth errors = %v, want gssapi-with-mic auth not configured", serverErrs)
 	}
 }
 
