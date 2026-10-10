@@ -90,7 +90,8 @@ func TestSSHCLIAuth(t *testing.T) {
 	}
 
 	// test public key authentication.
-	cmd := testenv.Command(t, sshCLI, "-vvv", "-i", keyPrivPath, "-o", "StrictHostKeyChecking=no",
+	cmd := testenv.Command(t, sshCLI, "-F", "none", "-vvv", "-i", keyPrivPath,
+		"-o", "StrictHostKeyChecking=no", "-o", "IdentityAgent=none",
 		"-p", port, "testpubkey@127.0.0.1", "true")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -99,7 +100,8 @@ func TestSSHCLIAuth(t *testing.T) {
 	// Test SSH user certificate authentication.
 	// The username must match one of the principals included in the certificate.
 	// The certificate "rsa-user-testcertificate" has "testcertificate" as principal.
-	cmd = testenv.Command(t, sshCLI, "-vvv", "-i", keyPrivPath, "-o", "StrictHostKeyChecking=no",
+	cmd = testenv.Command(t, sshCLI, "-F", "none", "-vvv", "-i", keyPrivPath,
+		"-o", "StrictHostKeyChecking=no", "-o", "IdentityAgent=none",
 		"-p", port, "testcertificate@127.0.0.1", "true")
 	out, err = cmd.CombinedOutput()
 	if err != nil {
@@ -121,7 +123,7 @@ func TestSSHCLIKeyExchanges(t *testing.T) {
 	keyExchanges := append(ssh.SupportedAlgorithms().KeyExchanges, ssh.InsecureAlgorithms().KeyExchanges...)
 	for _, kex := range keyExchanges {
 		t.Run(kex, func(t *testing.T) {
-			cmd := testenv.Command(t, sshCLI, "-Q", "kex")
+			cmd := testenv.Command(t, sshCLI, "-F", "none", "-Q", "kex")
 			out, err := cmd.CombinedOutput()
 			if err != nil {
 				t.Fatalf("%s failed to check if the KEX is supported, error: %v, command output %q", kex, err, string(out))
@@ -154,7 +156,8 @@ func TestSSHCLIKeyExchanges(t *testing.T) {
 				t.Fatalf("unable to get server port: %v", err)
 			}
 
-			cmd = testenv.Command(t, sshCLI, "-vvv", "-i", keyPrivPath, "-o", "StrictHostKeyChecking=no",
+			cmd = testenv.Command(t, sshCLI, "-F", "none", "-vvv", "-i", keyPrivPath,
+				"-o", "StrictHostKeyChecking=no", "-o", "IdentityAgent=none",
 				"-o", fmt.Sprintf("KexAlgorithms=%s", kex), "-p", port, "testpubkey@127.0.0.1", "true")
 			out, err = cmd.CombinedOutput()
 			if err != nil {
@@ -245,5 +248,65 @@ func TestSSHCLIControlClientConn(t *testing.T) {
 	out, err := session.CombinedOutput("true")
 	if err != nil {
 		t.Fatalf("command execution failed, error: %v, command output %q", err, string(out))
+	}
+}
+
+func TestSSHCLICBCEtM(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skipf("always fails on Windows, see #64403")
+	}
+	sshCLI := sshClient(t)
+	keyFiles := map[string][]byte{
+		"rsa":     testdata.PEMBytes["rsa"],
+		"rsa.pub": ssh.MarshalAuthorizedKey(testPublicKeys["rsa"]),
+	}
+	keyPrivPath := setupSSHCLIKeys(t, keyFiles, "rsa")
+
+	for _, cipher := range []string{ssh.InsecureCipherAES128CBC, ssh.InsecureCipherTripleDESCBC} {
+		for _, mac := range []string{ssh.HMACSHA256ETM, ssh.HMACSHA512ETM} {
+			t.Run(cipher+","+mac, func(t *testing.T) {
+				cmd := testenv.Command(t, sshCLI, "-F", "none", "-Q", "cipher")
+				out, err := cmd.CombinedOutput()
+				if err != nil {
+					t.Fatalf("failed to check if the cipher is supported, error: %v, command output %q", err, string(out))
+				}
+				if !bytes.Contains(out, []byte(cipher)) {
+					t.Skipf("cipher %q is not supported in the installed ssh CLI", cipher)
+				}
+				config := &ssh.ServerConfig{
+					Config: ssh.Config{
+						Ciphers: []string{cipher},
+						MACs:    []string{mac},
+					},
+					PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+						if conn.User() == "testpubkey" && bytes.Equal(key.Marshal(), testPublicKeys["rsa"].Marshal()) {
+							return nil, nil
+						}
+
+						return nil, fmt.Errorf("pubkey for %q not acceptable", conn.User())
+					},
+				}
+				config.AddHostKey(testSigners["rsa"])
+
+				server, err := newTestServer(config)
+				if err != nil {
+					t.Fatalf("unable to start test server: %v", err)
+				}
+				defer server.Close()
+
+				port, err := server.port()
+				if err != nil {
+					t.Fatalf("unable to get server port: %v", err)
+				}
+
+				cmd = testenv.Command(t, sshCLI, "-F", "none", "-vvv", "-i", keyPrivPath,
+					"-o", "StrictHostKeyChecking=no", "-o", "IdentityAgent=none",
+					"-c", cipher, "-m", mac, "-p", port, "testpubkey@127.0.0.1", "true")
+				out, err = cmd.CombinedOutput()
+				if err != nil {
+					t.Fatalf("connection failed, error: %v, command output %q", err, string(out))
+				}
+			})
+		}
 	}
 }
