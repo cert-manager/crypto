@@ -200,6 +200,7 @@ func (c *Client) accountKeyRollover(ctx context.Context, newKey crypto.Signer) e
 // Once all authorizations are satisfied, the caller will typically want to poll
 // order status using WaitOrder until it's in StatusReady state.
 // To finalize the order and obtain a certificate, the caller submits a CSR with CreateCertFromOrder.
+// A caller that must not wait for the CA to issue the certificate can use FinalizeOrder instead.
 func (c *Client) AuthorizeOrder(ctx context.Context, id []AuthzID, opt ...OrderOption) (*Order, error) {
 	dir, err := c.Discover(ctx)
 	if err != nil {
@@ -389,7 +390,11 @@ func responseOrder(res *http.Response) (*Order, error) {
 // CreateOrderCert returns an error if the CA's response is unreasonably large.
 // Callers are encouraged to parse the returned value to ensure the certificate is valid and has the expected features.
 func (c *Client) CreateOrderCert(ctx context.Context, url string, csr []byte, bundle bool) (der [][]byte, certURL string, err error) {
-	return c.createOrderCert(ctx, url, "", csr, bundle)
+	o, err := c.finalizeOrder(ctx, url, "", csr)
+	if err != nil {
+		return nil, "", err
+	}
+	return c.waitOrderCert(ctx, o, bundle)
 }
 
 // CreateCertFromOrder submits the CSR (Certificate Signing Request) to a CA for
@@ -405,24 +410,59 @@ func (c *Client) CreateOrderCert(ctx context.Context, url string, csr []byte, bu
 // CreateCertFromOrder returns an error if the CA's response is unreasonably large.
 // Callers are encouraged to parse the returned value to ensure the certificate is valid and has the expected features.
 func (c *Client) CreateCertFromOrder(ctx context.Context, order *Order, csr []byte, bundle bool) (der [][]byte, certURL string, err error) {
-	if order == nil {
-		return nil, "", errors.New("acme: nil order")
-	}
-	if order.URI == "" {
-		return nil, "", errors.New("acme: order URI is empty")
-	}
-	if order.FinalizeURL == "" {
-		return nil, "", errors.New("acme: order finalize URL is empty")
-	}
-	return c.createOrderCert(ctx, order.FinalizeURL, order.URI, csr, bundle)
-}
-
-func (c *Client) createOrderCert(ctx context.Context, finalizeURL, orderURL string, csr []byte, bundle bool) (der [][]byte, certURL string, err error) {
-	if _, err := c.Discover(ctx); err != nil { // required by c.accountKID
+	o, err := c.FinalizeOrder(ctx, order, csr)
+	if err != nil {
 		return nil, "", err
 	}
+	return c.waitOrderCert(ctx, o, bundle)
+}
 
-	// RFC describes this as "finalize order" request.
+// FinalizeOrder submits the CSR (Certificate Signing Request) to a CA for
+// the specified Order created with AuthorizeOrder, and returns the order
+// from the CA's response. It does not wait for the CA to issue the certificate.
+//
+// Callers should inspect the Status of the returned order:
+//
+//   - StatusValid: the certificate has been issued and can be downloaded
+//     from the order's CertURL using FetchCert.
+//   - StatusProcessing: the certificate is being issued. Poll the order
+//     using GetOrder or WaitOrder.
+//   - StatusInvalid: the certificate will not be issued. The order's Error
+//     field describes the problem, if the CA provided one. FinalizeOrder
+//     does not return an error in this case.
+//   - Any other status: poll the order using GetOrder.
+//
+// The order must be in StatusReady. If it has already been finalized,
+// the CA responds with an orderNotReady error, which FinalizeOrder returns.
+// A caller that does not know whether an earlier FinalizeOrder call
+// succeeded should fetch the order using GetOrder first.
+//
+// FinalizeOrder retries the request as described in Client.RetryBackoff,
+// which by default continues until ctx is done. Callers that must not
+// block should set a deadline on ctx.
+//
+// Most users should prefer CreateCertFromOrder, which also waits for the
+// certificate and downloads it.
+func (c *Client) FinalizeOrder(ctx context.Context, order *Order, csr []byte) (*Order, error) {
+	if order == nil {
+		return nil, errors.New("acme: nil order")
+	}
+	if order.URI == "" {
+		return nil, errors.New("acme: order URI is empty")
+	}
+	if order.FinalizeURL == "" {
+		return nil, errors.New("acme: order finalize URL is empty")
+	}
+	return c.finalizeOrder(ctx, order.FinalizeURL, order.URI, csr)
+}
+
+// finalizeOrder sends the RFC 8555 "finalize order" request.
+// If orderURL is empty, the order URI is taken from the Location header
+// of the response, which RFC 8555 does not require.
+func (c *Client) finalizeOrder(ctx context.Context, finalizeURL, orderURL string, csr []byte) (*Order, error) {
+	if _, err := c.Discover(ctx); err != nil { // required by c.accountKID
+		return nil, err
+	}
 	req := struct {
 		CSR string `json:"csr"`
 	}{
@@ -430,20 +470,24 @@ func (c *Client) createOrderCert(ctx context.Context, finalizeURL, orderURL stri
 	}
 	res, err := c.post(ctx, nil, finalizeURL, req, wantStatus(http.StatusOK))
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	defer res.Body.Close()
 	o, err := responseOrder(res)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
+	if orderURL != "" {
+		o.URI = orderURL
+	}
+	return o, nil
+}
 
-	// Wait for CA to issue the cert if they haven't.
+// waitOrderCert waits for the CA to issue the certificate for a finalized
+// order, if it has not already, and downloads it.
+func (c *Client) waitOrderCert(ctx context.Context, o *Order, bundle bool) (der [][]byte, certURL string, err error) {
 	if o.Status != StatusValid {
-		if orderURL == "" {
-			orderURL = o.URI
-		}
-		o, err = c.WaitOrder(ctx, orderURL)
+		o, err = c.WaitOrder(ctx, o.URI)
 	}
 	if err != nil {
 		return nil, "", err

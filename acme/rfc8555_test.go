@@ -1183,6 +1183,9 @@ func TestRFC_CreateCertFromOrderInvalidOrder(t *testing.T) {
 			if _, _, err := cl.CreateCertFromOrder(context.Background(), tt.order, nil, false); err == nil {
 				t.Fatal("CreateCertFromOrder returned nil error")
 			}
+			if _, err := cl.FinalizeOrder(context.Background(), tt.order, nil); err == nil {
+				t.Fatal("FinalizeOrder returned nil error")
+			}
 		})
 	}
 }
@@ -1234,5 +1237,51 @@ func TestRFC_ListCertAlternates(t *testing.T) {
 	}
 	if crts != nil {
 		t.Errorf("ListCertAlternates(/crt2): %v; want nil", crts)
+	}
+}
+
+func TestRFC_FinalizeOrder(t *testing.T) {
+	s := newACMEServer()
+	s.handle("/acme/new-account", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", s.url("/accounts/1"))
+		w.Write([]byte(`{"status": "valid"}`))
+	})
+	s.handle("/finalize", func(w http.ResponseWriter, r *http.Request) {
+		var jws struct{ Payload string }
+		if err := json.NewDecoder(r.Body).Decode(&jws); err != nil {
+			t.Errorf("decoding JWS: %v", err)
+		}
+		payload, err := base64.RawURLEncoding.DecodeString(jws.Payload)
+		if err != nil {
+			t.Errorf("decoding JWS payload: %v", err)
+		}
+		// "Y3Ny" is the base64url encoding of "csr".
+		if got, want := string(payload), `{"csr":"Y3Ny"}`; got != want {
+			t.Errorf("finalize payload = %s; want %s", got, want)
+		}
+		// No Location header: RFC 8555 does not require one here.
+		w.Header().Set("Retry-After", "7")
+		fmt.Fprint(w, `{"status":"processing"}`)
+	})
+	s.handle("/orders/1", func(w http.ResponseWriter, r *http.Request) {
+		t.Error("FinalizeOrder polled the order")
+	})
+	s.start()
+	defer s.close()
+
+	cl := &Client{Key: testKeyEC, DirectoryURL: s.url("/")}
+	order := &Order{URI: s.url("/orders/1"), FinalizeURL: s.url("/finalize")}
+	o, err := cl.FinalizeOrder(context.Background(), order, []byte("csr"))
+	if err != nil {
+		t.Fatalf("FinalizeOrder: %v", err)
+	}
+	if o.Status != StatusProcessing {
+		t.Errorf("o.Status = %q; want %q", o.Status, StatusProcessing)
+	}
+	if o.URI != order.URI {
+		t.Errorf("o.URI = %q; want %q", o.URI, order.URI)
+	}
+	if want := 7 * time.Second; o.RetryAfter != want {
+		t.Errorf("o.RetryAfter = %v; want %v", o.RetryAfter, want)
 	}
 }
