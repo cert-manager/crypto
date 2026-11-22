@@ -1236,3 +1236,37 @@ func TestRFC_ListCertAlternates(t *testing.T) {
 		t.Errorf("ListCertAlternates(/crt2): %v; want nil", crts)
 	}
 }
+
+func TestRFC_FinalizeOrder(t *testing.T) {
+	s := newACMEServer()
+	s.handle("/acme/new-account", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", s.url("/accounts/1"))
+		w.Write([]byte(`{"status": "valid"}`))
+	})
+	s.handle("/finalize", func(w http.ResponseWriter, r *http.Request) {
+		// No Location header: RFC 8555 does not require one here.
+		w.Header().Set("Retry-After", "7")
+		fmt.Fprint(w, `{"status":"processing"}`)
+	})
+	s.handle("/orders/1", func(w http.ResponseWriter, r *http.Request) {
+		t.Error("FinalizeOrder polled the order")
+	})
+	s.start()
+	defer s.close()
+
+	cl := &Client{Key: testKeyEC, DirectoryURL: s.url("/")}
+	order := &Order{URI: s.url("/orders/1"), FinalizeURL: s.url("/finalize")}
+	o, err := cl.FinalizeOrder(context.Background(), order, []byte("csr"))
+	if err != nil {
+		t.Fatalf("FinalizeOrder: %v", err)
+	}
+	if o.Status != StatusProcessing {
+		t.Errorf("o.Status = %q; want %q", o.Status, StatusProcessing)
+	}
+	if o.URI != order.URI {
+		t.Errorf("o.URI = %q; want %q", o.URI, order.URI)
+	}
+	if want := 7 * time.Second; o.RetryAfter != want {
+		t.Errorf("o.RetryAfter = %v; want %v", o.RetryAfter, want)
+	}
+}
