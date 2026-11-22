@@ -409,7 +409,7 @@ type Order struct {
 	Profile ProfileName
 	// RetryAfter specifies how long the client should wait before polling the order again,
 	// based on the Retry-After header provided by the server while the order is in the
-	// StatusProcessing state.
+	// StatusProcessing state. It is set by GetOrder and FinalizeOrder.
 	//
 	// See RFC 8555 Section 7.4.
 	RetryAfter time.Duration

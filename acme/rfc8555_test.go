@@ -1183,6 +1183,9 @@ func TestRFC_CreateCertFromOrderInvalidOrder(t *testing.T) {
 			if _, _, err := cl.CreateCertFromOrder(context.Background(), tt.order, nil, false); err == nil {
 				t.Fatal("CreateCertFromOrder returned nil error")
 			}
+			if _, err := cl.FinalizeOrder(context.Background(), tt.order, nil); err == nil {
+				t.Fatal("FinalizeOrder returned nil error")
+			}
 		})
 	}
 }
@@ -1244,6 +1247,18 @@ func TestRFC_FinalizeOrder(t *testing.T) {
 		w.Write([]byte(`{"status": "valid"}`))
 	})
 	s.handle("/finalize", func(w http.ResponseWriter, r *http.Request) {
+		var jws struct{ Payload string }
+		if err := json.NewDecoder(r.Body).Decode(&jws); err != nil {
+			t.Errorf("decoding JWS: %v", err)
+		}
+		payload, err := base64.RawURLEncoding.DecodeString(jws.Payload)
+		if err != nil {
+			t.Errorf("decoding JWS payload: %v", err)
+		}
+		// "Y3Ny" is the base64url encoding of "csr".
+		if got, want := string(payload), `{"csr":"Y3Ny"}`; got != want {
+			t.Errorf("finalize payload = %s; want %s", got, want)
+		}
 		// No Location header: RFC 8555 does not require one here.
 		w.Header().Set("Retry-After", "7")
 		fmt.Fprint(w, `{"status":"processing"}`)
